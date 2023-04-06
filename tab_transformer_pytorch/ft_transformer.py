@@ -26,12 +26,14 @@ class Attention(nn.Module):
         dim,
         heads = 8,
         dim_head = 64,
-        dropout = 0.
+        dropout = 0.,
+        explainable = False
     ):
         super().__init__()
         inner_dim = dim_head * heads
         self.heads = heads
         self.scale = dim_head ** -0.5
+        self.explainable = explainable
 
         self.norm = nn.LayerNorm(dim)
 
@@ -56,7 +58,13 @@ class Attention(nn.Module):
 
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)', h = h)
-        return self.to_out(out)
+        out = self.to_out(out)
+
+        if self.explainable:
+            attn_weight = torch.sum(attn[:, :, 0, :], axis = 1)
+            return out, attn_weight
+        else:
+            return out
 
 # transformer
 
@@ -68,23 +76,38 @@ class Transformer(nn.Module):
         heads,
         dim_head,
         attn_dropout,
-        ff_dropout
+        ff_dropout,
+        explainable
     ):
         super().__init__()
+        self.depth = depth
+        self.heads = heads
+        self.explainable = explainable
         self.layers = nn.ModuleList([])
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head, dropout = attn_dropout),
+                Attention(dim, heads = heads, dim_head = dim_head, dropout = attn_dropout, explainable = explainable),
                 FeedForward(dim, dropout = ff_dropout),
             ]))
 
     def forward(self, x):
+        importances = []
         for attn, ff in self.layers:
-            x = attn(x) + x
+            if self.explainable:
+                attn_x, impt = attn(x)
+                importances.append(impt)
+            else:
+                attn_x = attn(x)
+            x = attn_x + x
             x = ff(x) + x
-
-        return x
+        
+        if self.explainable:
+            importances = torch.stack(importances)
+            importances = torch.sum(importances, dim = 0) / (self.depth * self.heads)
+            return x, importances
+        else:
+            return x
 
 # numerical embedder
 
@@ -113,11 +136,15 @@ class FTTransformer(nn.Module):
         dim_out = 1,
         num_special_tokens = 2,
         attn_dropout = 0.,
-        ff_dropout = 0.
+        ff_dropout = 0.,
+        explainable = False
     ):
         super().__init__()
         assert all(map(lambda n: n > 0, categories)), 'number of each category must be positive'
         assert len(categories) + num_continuous > 0, 'input shape must not be null'
+
+        # Explainable Setting
+        self.explainable = explainable
 
         # categories related calculations
 
@@ -159,7 +186,8 @@ class FTTransformer(nn.Module):
             heads = heads,
             dim_head = dim_head,
             attn_dropout = attn_dropout,
-            ff_dropout = ff_dropout
+            ff_dropout = ff_dropout,
+            explainable = explainable
         )
 
         # to logits
@@ -198,7 +226,10 @@ class FTTransformer(nn.Module):
 
         # attend
 
-        x = self.transformer(x)
+        if self.explainable:
+            x, expl = self.transformer(x)
+        else:
+            x = self.transformer(x)
 
         # get cls token
 
@@ -206,4 +237,9 @@ class FTTransformer(nn.Module):
 
         # out in the paper is linear(relu(ln(cls)))
 
-        return self.to_logits(x)
+        out = self.to_logits(x)
+        
+        if self.explainable:
+            return {"output": out, "importances": expl}
+        else:
+            return out
