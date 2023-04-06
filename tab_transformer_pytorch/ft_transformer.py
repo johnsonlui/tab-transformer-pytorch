@@ -27,13 +27,11 @@ class Attention(nn.Module):
         heads = 8,
         dim_head = 64,
         dropout = 0.,
-        explainable = False
     ):
         super().__init__()
         inner_dim = dim_head * heads
         self.heads = heads
         self.scale = dim_head ** -0.5
-        self.explainable = explainable
 
         self.norm = nn.LayerNorm(dim)
 
@@ -73,17 +71,13 @@ class Transformer(nn.Module):
         dim_head,
         attn_dropout,
         ff_dropout,
-        explainable
     ):
         super().__init__()
-        self.depth = depth
-        self.heads = heads
-        self.explainable = explainable
         self.layers = nn.ModuleList([])
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head, dropout = attn_dropout, explainable = explainable),
+                Attention(dim, heads = heads, dim_head = dim_head, dropout = attn_dropout),
                 FeedForward(dim, dropout = ff_dropout),
             ]))
 
@@ -129,15 +123,11 @@ class FTTransformer(nn.Module):
         dim_out = 1,
         num_special_tokens = 2,
         attn_dropout = 0.,
-        ff_dropout = 0.,
-        explainable = False
+        ff_dropout = 0.
     ):
         super().__init__()
         assert all(map(lambda n: n > 0, categories)), 'number of each category must be positive'
         assert len(categories) + num_continuous > 0, 'input shape must not be null'
-
-        # Explainable Setting
-        self.explainable = explainable
 
         # categories related calculations
 
@@ -172,15 +162,16 @@ class FTTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
 
         # transformer
-
+        
+        self.depth = depth
+        self.heads = heads
         self.transformer = Transformer(
             dim = dim,
             depth = depth,
             heads = heads,
             dim_head = dim_head,
             attn_dropout = attn_dropout,
-            ff_dropout = ff_dropout,
-            explainable = explainable
+            ff_dropout = ff_dropout
         )
 
         # to logits
@@ -232,4 +223,6 @@ class FTTransformer(nn.Module):
         if not return_attn:
             return logits
 
+        attns = torch.sum(attns[:, :, :, 0, :], axis=2)
+        attns = torch.sum(attns, dim=0) / (self.depth * self.heads)
         return logits, attns
