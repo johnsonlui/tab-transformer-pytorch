@@ -54,17 +54,13 @@ class Attention(nn.Module):
         sim = einsum('b h i d, b h j d -> b h i j', q, k)
 
         attn = sim.softmax(dim = -1)
-        attn = self.dropout(attn)
+        dropped_attn = self.dropout(attn)
 
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        out = einsum('b h i j, b h j d -> b h i d', dropped_attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)', h = h)
         out = self.to_out(out)
 
-        if self.explainable:
-            attn_weight = torch.sum(attn[:, :, 0, :], axis = 1)
-            return out, attn_weight
-        else:
-            return out
+        return out, attn
 
 # transformer
 
@@ -91,23 +87,20 @@ class Transformer(nn.Module):
                 FeedForward(dim, dropout = ff_dropout),
             ]))
 
-    def forward(self, x):
-        importances = []
+    def forward(self, x, return_attn = False):
+        post_softmax_attns = []
+
         for attn, ff in self.layers:
-            if self.explainable:
-                attn_x, impt = attn(x)
-                importances.append(impt)
-            else:
-                attn_x = attn(x)
-            x = attn_x + x
+            attn_out, post_softmax_attn = attn(x)
+            post_softmax_attns.append(post_softmax_attn)
+
+            x = attn_out + x
             x = ff(x) + x
-        
-        if self.explainable:
-            importances = torch.stack(importances)
-            importances = torch.sum(importances, dim = 0) / (self.depth * self.heads)
-            return x, importances
-        else:
+
+        if not return_attn:
             return x
+
+        return x, torch.stack(post_softmax_attns)
 
 # numerical embedder
 
@@ -198,7 +191,7 @@ class FTTransformer(nn.Module):
             nn.Linear(dim, dim_out)
         )
 
-    def forward(self, x_categ, x_numer):
+    def forward(self, x_categ, x_numer, return_attn = False):
         assert x_categ.shape[-1] == self.num_categories, f'you must pass in {self.num_categories} values for your categories input'
 
         xs = []
@@ -226,10 +219,7 @@ class FTTransformer(nn.Module):
 
         # attend
 
-        if self.explainable:
-            x, expl = self.transformer(x)
-        else:
-            x = self.transformer(x)
+        x, attns = self.transformer(x, return_attn = True)
 
         # get cls token
 
@@ -237,9 +227,9 @@ class FTTransformer(nn.Module):
 
         # out in the paper is linear(relu(ln(cls)))
 
-        out = self.to_logits(x)
-        
-        if self.explainable:
-            return {"output": out, "importances": expl}
-        else:
-            return out
+        logits = self.to_logits(x)
+
+        if not return_attn:
+            return logits
+
+        return logits, attns
